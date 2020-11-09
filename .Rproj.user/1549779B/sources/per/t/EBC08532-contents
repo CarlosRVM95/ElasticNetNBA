@@ -1,0 +1,176 @@
+---
+title: "ELASTICNET"
+author: "Carlos Rodríguez-Viña Martínez"
+date: "9/11/2020"
+output: html_document
+---
+Procedemos a cargar todas las librerías que vamos a utilizar dentro de nuestro trabajo
+```{r tidy=TRUE,message=FALSE, warning=FALSE, include=FALSE}
+library(here) # Comentar
+library(tidyverse)
+library(janitor) # Clean names
+library(skimr) # Beautiful Summarize
+library(magrittr) # Pipe operators
+library(corrplot) # Correlations
+library(ggcorrplot)  # Correlations
+library(PerformanceAnalytics) # Correlations
+library(leaps) # Model selection
+library(MASS)
+library(dplyr)
+library(readr)
+library(gvlma)
+library(MASS)
+library(car)
+library(glmnet)
+library(boot)
+library(leaps)
+library(AmesHousing)
+library(rsample)
+```
+Procedemos a cargar nuestro Dataframe
+```{r tidy=TRUE,message=FALSE, warning=FALSE, include=FALSE}
+NBA <- read_csv('nba.csv')
+attach(NBA)
+head(NBA)
+names(NBA)
+View(NBA)
+```
+
+
+Procedemos a estudiar y revisar el dataframe, para tener un mejor entendimiento de los datos que he extraido
+
++ Observamos los valores únicos de cada uno de las filas dentro del datafram
+```{r echo=FALSE}
+distinct(NBA)
+```
+
++ Procedemos a estudiar los duplicados dentro de la columna "Player", puesto que consideramos razonable que dentro de las otras columnas existan valores iguales.
+```{r echo=FALSE}
+distinct(NBA,NBA$Player)
+```
+
++ Procedemos a calcular cuál es el número de jugadores duplicados dentro del dataframe "NBA"
+```{r echo=FALSE }
+duplicated(NBA)
+nrow(NBA[duplicated(NBA$Player),])
+NBA<- NBA[!duplicated(NBA$Player),]
+```
+
++ Obtenemos que existen dos valores duplicados y procedemos a eliminarlos de nuestro dataframe.
+```{r echo=FALSE}
+distinct(NBA)
+nrow(NBA[duplicated(NBA$Player),])
+```
+Una vez que hemos eliminado, vamos a proceder a crear el modelo de regresión lineal, pero primero tenemos que realizar un pequeño ajsute al nombre de nuestras columnas, porque aparecen con números y simbolos, los cuales la función lm() no va a ser capaza de leer. Es por ello que vamos a susitutir dichos simbolos por caracteres que si que pueda leer.
+
+```{r echo=FALSE}
+NBA <- rename_with(NBA,~ sub("%", ".", .x))
+NBA <- rename_with(NBA,~ sub("3", "three", .x))
+NBA <- rename_with(NBA,~ sub("/", ".", .x))
+colnames(NBA)
+```
+
+Procedemos a todos los valores nullos que tenemos en el dataframe los llenamos con 0, podríamos llenarlo
+con la media de los valors de la columna o con la media de los jugadores igual.
+```{r echo=FALSE}
+sapply(NBA, function(x) sum(is.na(x)))
+NBA[["TS."]][is.na(NBA[["TS."]])] <- 0
+NBA[["threePAr"]][is.na(NBA[["threePAr"]])] <- 0
+NBA[["FTr"]][is.na(NBA[["FTr"]])] <- 0
+NBA[["TOV."]][is.na(NBA[["TOV."]])] <- 0
+```
+
+
+Convertimos la variable salario en logaritmo de salario
+```{r }
+logNBA <- NBA %>% mutate(Salary = log(Salary))
+```
+
+Creamos el train sample y el test sample 
+```{r }
+set.seed(123)
+
+NBA_split <- initial_split(logNBA, prop = .7)
+NBA_train <- training(NBA_split)
+NBA_test <- testing(NBA_split)
+
+```
+
+Creamos el modelo para la muestra de train y de test 
+```{r }
+NBA_train_x <- model.matrix(Salary~., NBA_train)
+NBA_train_y <- log(NBA_train$Salary)
+
+NBA_test_x <- model.matrix(Salary~., NBA_test) 
+NBA_test_y <- log(NBA_test$Salary)
+```
+
+Aplicamos la función gmlet para ver los valores de alpha que posteriormente vamos a utilizar para dibujar la gráfica.
+
+```{r }
+lasso_nba <- glmnet(NBA_train_x,NBA_train_y, alpha = 1.0)
+elastic1 <- glmnet(NBA_train_x,NBA_train_y, alpha = 0.25)
+elastic2 <- glmnet(NBA_train_x,NBA_train_y, alpha = 0.75)
+ridge_nba <- glmnet(NBA_train_x,NBA_train_y, alpha = 0.0)
+```
+
+Dibujo las gráficas
+```{r }
+par(mfrow = c(2,2), mar = c(6,4,6,2) + 0.1)
+plot(lasso_nba, xvar = "lambda", main = "Lasso (Alpha = 1)\n\n\n")
+plot(elastic1, xvar = "lambda", main = "Elastic1 (Alpha = 0.25)\n\n\n")
+plot(elastic2, xvar = "lambda", main = "Elastic2 (Alpha = 0.75)\n\n\n")
+plot(ridge_nba, xvar = "lambda", main = "Ridge (Alpha = 0)\n\n\n")
+```
+
+Mantenemos la muestra constante para todos los modelos
+```{r }
+fold_idnba <- sample(1:20, size = length(NBA_train_y), replace = TRUE)
+
+```
+
+Buscamos por todos los valores de alpha
+```{r }
+tuning_grid <- tibble::tibble(
+  alpha       = seq(0,1, by= .1), #Creo una tabla con todos los valores de alpha 
+  mse_min     = NA, # y para el resto de variables le indico que es 0.
+  mse_1se     = NA,
+  lambda_min  = NA,
+  lambda_1se  = NA
+)
+tuning_grid
+```
+
+Procedemos Aplicar la función cv elastic para todos los valores de alpha entro 0 y 1
+```{r }
+for(i in seq_along(tuning_grid$alpha)) { # Indico para todos los valores de alpha de la f.turning grif
+                                        # que se aplique la función de abajo
+  #Metemos el modelo para cada valor de alpha
+  fit <- cv.glmnet(NBA_train_x, NBA_train_y, alpha = tuning_grid$alpha[i], foldid = fold_idnba)
+  # alpha = a los valores de alpha indicados en la función de turning grid
+  # fol_id =  a la muestra de valores que previamente había creado.
+  
+  #Extraemos los valores lambda y MSE
+  tuning_grid$mse_min[i] <- fit$cvm[fit$lambda == fit$lambda.min]
+  tuning_grid$mse_1se[i] <- fit$cvm[fit$lambda == fit$lambda.1se]
+  tuning_grid$lambda_min[i] <- fit$lambda.min
+  tuning_grid$lambda_1se[i] <- fit$lambda.1se
+  
+}
+
+tuning_grid
+```
+Una vez realizado el modelo me devuelve que cuando alpha=1,la función me da el valor de lambda optimo
+que es 0,000579 y este lambda me ofrece el valor del mínimo error de del modelo entre todos los valores de alpha
+
+
+Procedemos a realizar una gráfica con el eje y los valores del error mínimo y en ele eje x los valores
+lambda
+```{r }
+tuning_grid %>%
+  mutate(se = mse_1se - mse_min) %>%
+  ggplot(aes(alpha, mse_min)) +
+  geom_line(size = 2) +
+  geom_ribbon(aes(ymax = mse_min + se, ymin = mse_min - se), alpha = .25) +
+  ggtitle("MSE ± one standard error")
+````
